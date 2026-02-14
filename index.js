@@ -192,6 +192,7 @@ const getQuantumData = async (dateFilter = null, shiftFilter = null, unitFilter 
   // If no date or shift filter provided, find the latest available across all relevant units
   let targetDateStr = dateFilter;
   let targetShift = shiftFilter === 'all' ? null : shiftFilter;
+  let targetLatestShift = 'All';
 
   if (!targetDateStr || (!targetShift && shiftFilter !== 'all')) {
     let allRecords = [];
@@ -208,11 +209,11 @@ const getQuantumData = async (dateFilter = null, shiftFilter = null, unitFilter 
       }))].filter(Boolean).sort().reverse();
 
       if (!targetDateStr && availableDates.length > 0) {
-        // Default to yesterday (second most recent) if available, otherwise latest
-        targetDateStr = availableDates[1] || availableDates[0];
+        // Default to latest date for Home, Dashboard will handle yesterday default
+        targetDateStr = availableDates[0];
       }
 
-      if (!targetShift && shiftFilter !== 'all' && targetDateStr) {
+      if (targetDateStr) {
         const shiftsForDate = [...new Set(allRecords
           .filter(item => {
             const dateVal = item.ShiftStartTime || item.shiftstarttime || item.Date;
@@ -222,9 +223,14 @@ const getQuantumData = async (dateFilter = null, shiftFilter = null, unitFilter 
           .map(item => item.ShiftNumber || item.Shift || item.shiftnumber || item.shift)
         )].filter(Boolean).sort((a, b) => b - a); // Descending for latest shift
 
-        if (shiftsForDate.length > 0) {
-          targetShift = shiftsForDate[0];
+        const latestShiftForDate = shiftsForDate[0] || 'All';
+
+        if (!targetShift && shiftFilter !== 'all') {
+          targetShift = latestShiftForDate;
         }
+        
+        // We'll attach this latestShiftForDate to each unit's response
+        targetLatestShift = latestShiftForDate;
       }
     }
   }
@@ -234,7 +240,7 @@ const getQuantumData = async (dateFilter = null, shiftFilter = null, unitFilter 
       const jsonData = cachedUnitsData[unit] || [];
 
       if (jsonData.length === 0) {
-        return { unit, yarnFaults: 'N/A', shiftStartTime: null, articles: [] };
+        return { unit, yarnFaults: 'N/A', shiftStartTime: null, articles: [], latestShift: 'All' };
       }
 
       const records = jsonData.filter(item => {
@@ -517,6 +523,7 @@ const getQuantumData = async (dateFilter = null, shiftFilter = null, unitFilter 
         unitQuality: unitQualityVals,
         shiftStartTime: targetDateStr,
         shiftNumber: targetShift || 'All',
+        latestShift: targetLatestShift,
         articles
       };
     });
