@@ -7,7 +7,24 @@ import { createClient } from '@supabase/supabase-js';
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-app.use(cors());
+// CORS configuration
+const allowedOrigins = process.env.ALLOWED_ORIGINS 
+  ? process.env.ALLOWED_ORIGINS.split(',') 
+  : ['http://localhost:5173', 'http://localhost:3000'];
+
+app.use(cors({
+  origin: function(origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.indexOf(origin) !== -1 || allowedOrigins.includes('*')) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true
+}));
+
 app.use(express.json());
 
 // Supabase Config (from Uster Quantum Dashboard.html)
@@ -191,7 +208,8 @@ const getQuantumData = async (dateFilter = null, shiftFilter = null, unitFilter 
       }))].filter(Boolean).sort().reverse();
 
       if (!targetDateStr && availableDates.length > 0) {
-        targetDateStr = availableDates[0];
+        // Default to yesterday (second most recent) if available, otherwise latest
+        targetDateStr = availableDates[1] || availableDates[0];
       }
 
       if (!targetShift && shiftFilter !== 'all' && targetDateStr) {
@@ -863,6 +881,36 @@ app.post('/api/change-password', async (req, res) => {
     res.json({ success: true, message: 'Password updated successfully' });
   } catch (error) {
     console.error('Change Password Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/restart-server', async (req, res) => {
+  try {
+    const serviceId = 'srv-d68887ur433s73cg6q1g';
+    const apiKey = process.env.RENDER_API_KEY;
+
+    if (!apiKey || apiKey === 'your_render_api_key_here') {
+      return res.status(500).json({ error: 'Render API key not configured' });
+    }
+
+    const response = await fetch(`https://api.render.com/v1/services/${serviceId}/restart`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Accept': 'application/json',
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.message || `Failed to restart server: ${response.statusText}`);
+    }
+
+    res.json({ success: true, message: 'Server restart triggered successfully' });
+  } catch (error) {
+    console.error('Restart Server Error:', error);
     res.status(500).json({ error: error.message });
   }
 });
