@@ -669,7 +669,7 @@ app.get('/api/quantum/data/:unit', async (req, res) => {
 });
 
 app.get('/api/quantum/trend', async (req, res) => {
-  const { group, firstColumn, parameter, unit: unitFilter, filterValues } = req.query;
+  const { group, firstColumn, parameter, unit: unitFilter, filterValues, dates: datesFilter, filterType, additionalFilterValues, reportType = 'daily' } = req.query;
   
   if (!firstColumn || !parameter) {
     return res.status(400).json({ error: 'firstColumn and parameter are required' });
@@ -678,6 +678,16 @@ app.get('/api/quantum/trend', async (req, res) => {
   let filterValuesArray = null;
   if (filterValues) {
     filterValuesArray = Array.isArray(filterValues) ? filterValues : filterValues.split(',');
+  }
+
+  let datesFilterArray = null;
+  if (datesFilter) {
+    datesFilterArray = Array.isArray(datesFilter) ? datesFilter : datesFilter.split(',');
+  }
+
+  let additionalFilterValuesArray = null;
+  if (additionalFilterValues) {
+    additionalFilterValuesArray = Array.isArray(additionalFilterValues) ? additionalFilterValues : additionalFilterValues.split(',');
   }
 
   try {
@@ -702,6 +712,12 @@ app.get('/api/quantum/trend', async (req, res) => {
         const month = String(d.getMonth() + 1).padStart(2, '0');
         const day = String(d.getDate()).padStart(2, '0');
         const dateStr = `${year}-${month}-${day}`;
+        
+        // Filter by dates if provided
+        if (datesFilterArray && !datesFilterArray.includes(dateStr)) return;
+
+        const shift = item.ShiftNumber || item.Shift || item.shiftnumber || item.shift || '1';
+        const mapKey = reportType === 'shift' ? `${dateStr}_${shift}` : dateStr;
 
         let label = 'Unknown';
         if (firstColumn === 'unit') label = unit;
@@ -712,8 +728,20 @@ app.get('/api/quantum/trend', async (req, res) => {
 
         if (filterValuesArray && !filterValuesArray.includes(label)) return;
 
+        // Apply additional filters
+        if (filterType && additionalFilterValuesArray) {
+          let itemValue = 'Unknown';
+          if (filterType === 'unit') itemValue = unit;
+          else if (filterType === 'articlename') itemValue = item.ArticleName || item.articlename || item.Article || item.article || 'Unknown';
+          else if (filterType === 'articlenumber') itemValue = item.ArticleNumber || item.articlenumber || 'Unknown';
+          else if (filterType === 'lotid') itemValue = item.LotID || item.lotid || item.LotId || 'Unknown';
+          else if (filterType === 'machinename') itemValue = item.MachineName || item.machinename || item.Machine || item.machine || 'Unknown';
+
+          if (!additionalFilterValuesArray.includes(itemValue)) return;
+        }
+
         labels.add(label);
-        dates.add(dateStr);
+        dates.add(mapKey);
 
         // Find parameter value
         let val = 0;
@@ -745,23 +773,23 @@ app.get('/api/quantum/trend', async (req, res) => {
         const yarnLength = Number(item.YarnLength || item.yarnlength || 0) || 0;
         const machineName = item.MachineName || item.machinename || item.Machine || item.machine || 'Unknown';
 
-        if (!trendMap[dateStr]) trendMap[dateStr] = {};
-        if (!trendMap[dateStr][label]) {
-          trendMap[dateStr][label] = { sum: 0, refLength: 0, yarnLength: 0, count: 0, machines: {} };
+        if (!trendMap[mapKey]) trendMap[mapKey] = {};
+        if (!trendMap[mapKey][label]) {
+          trendMap[mapKey][label] = { sum: 0, refLength: 0, yarnLength: 0, count: 0, machines: {} };
         }
         
-        trendMap[dateStr][label].sum += val;
-        trendMap[dateStr][label].refLength += ipRefLength;
-        trendMap[dateStr][label].yarnLength += yarnLength;
-        trendMap[dateStr][label].count += 1;
+        trendMap[mapKey][label].sum += val;
+        trendMap[mapKey][label].refLength += ipRefLength;
+        trendMap[mapKey][label].yarnLength += yarnLength;
+        trendMap[mapKey][label].count += 1;
 
-        if (!trendMap[dateStr][label].machines[machineName]) {
-          trendMap[dateStr][label].machines[machineName] = { sum: 0, refLength: 0, yarnLength: 0, count: 0 };
+        if (!trendMap[mapKey][label].machines[machineName]) {
+          trendMap[mapKey][label].machines[machineName] = { sum: 0, refLength: 0, yarnLength: 0, count: 0 };
         }
-        trendMap[dateStr][label].machines[machineName].sum += val;
-        trendMap[dateStr][label].machines[machineName].refLength += ipRefLength;
-        trendMap[dateStr][label].machines[machineName].yarnLength += yarnLength;
-        trendMap[dateStr][label].machines[machineName].count += 1;
+        trendMap[mapKey][label].machines[machineName].sum += val;
+        trendMap[mapKey][label].machines[machineName].refLength += ipRefLength;
+        trendMap[mapKey][label].machines[machineName].yarnLength += yarnLength;
+        trendMap[mapKey][label].machines[machineName].count += 1;
       });
     });
 
@@ -846,7 +874,9 @@ app.get('/api/quantum/trend', async (req, res) => {
     res.json({
       data: result,
       labels: Array.from(labels).sort(),
-      dates: sortedDates,
+      dates: [...new Set(sortedDates.map(d => d.split('_')[0]))], // Unique base dates
+      allKeys: sortedDates, // All keys (date_shift or date)
+      reportType,
       drillDownData: drillDownData
     });
   } catch (error) {
