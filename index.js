@@ -51,44 +51,30 @@ const formatDateToYYYYMMDD = (date) => {
 app.get(['/api/quality/unique-article-numbers', '/api/long-term/unique-article-numbers'], async (req, res) => {
   try {
     const { q } = req.query;
-    if (!q || q.length < 1) {
-      return res.json([]);
-    }
+    
+    // OPTIMIZED: Use the unique_articles view if it exists, otherwise fallback to a limited scan
+    // This prevents Disk I/O spikes by avoiding full table scans for unique values
+    let { data, error } = await supabaseLongTerm
+      .from('unique_articles')
+      .select('ArticleNumber')
+      .ilike('ArticleNumber', `%${q || ''}%`)
+      .limit(100);
 
-    let allArticles = new Set();
-    let from = 0;
-    const step = 1000;
-    let hasMore = true;
-
-    while (hasMore) {
-      let query = supabaseLongTerm
+    if (error) {
+      // Fallback: If view doesn't exist, do a limited scan of the main table
+      // We only scan a limited range to prevent killing Disk I/O
+      const fallback = await supabaseLongTerm
         .from('uqe_data')
         .select('ArticleNumber')
-        .ilike('ArticleNumber', `%${q}%`)
-        .range(from, from + step - 1);
+        .ilike('ArticleNumber', `%${q || ''}%`)
+        .range(0, 1000);
       
-      const { data, error } = await query;
-      if (error) throw error;
-
-      if (!data || data.length === 0) {
-        hasMore = false;
-      } else {
-        data.forEach(item => {
-          if (item.ArticleNumber) {
-            allArticles.add(item.ArticleNumber);
-          }
-        });
-        
-        if (data.length < step) {
-          hasMore = false;
-        } else {
-          from += step;
-        }
-      }
+      if (fallback.error) throw fallback.error;
+      data = fallback.data;
     }
     
-    const sortedArticles = [...allArticles].sort();
-    res.json(sortedArticles);
+    const uniqueArticles = [...new Set(data.map(item => item.ArticleNumber))].sort();
+    res.json(uniqueArticles);
   } catch (error) {
     console.error('Error fetching unique articles:', error);
     res.status(500).json({ error: error.message });
@@ -136,15 +122,16 @@ app.get('/api/quality/data-by-article', async (req, res) => {
 
 app.get(['/api/quality/data', '/api/long-term/data'], async (req, res) => {
   try {
-    const { startDate, endDate, lotId, articles } = req.query;
+    const { startDate, endDate, lotId, articles, unit } = req.query;
 
     // Check if at least one filter is provided
     const hasDateFilter = startDate && endDate;
     const hasLotFilter = lotId && lotId.trim().length > 0;
     const hasArticleFilter = articles && articles.trim().length > 0;
+    const hasUnitFilter = unit && unit.trim().length > 0;
 
-    if (!hasDateFilter && !hasLotFilter && !hasArticleFilter) {
-      return res.status(400).json({ error: 'At least one filter (Date Range, Lot ID, or Articles) is required' });
+    if (!hasDateFilter && !hasLotFilter && !hasArticleFilter && !hasUnitFilter) {
+      return res.status(400).json({ error: 'At least one filter (Date Range, Lot ID, Articles, or Unit) is required' });
     }
 
     let allData = [];
@@ -169,6 +156,10 @@ app.get(['/api/quality/data', '/api/long-term/data'], async (req, res) => {
       if (hasArticleFilter) {
         const artList = articles.split(',').map(a => a.trim()).filter(Boolean);
         if (artList.length > 0) query = query.in('ArticleNumber', artList);
+      }
+
+      if (hasUnitFilter) {
+        query = query.eq('MillUnit', unit);
       }
 
       // Add range for pagination
@@ -320,7 +311,7 @@ const getQuantumData = async (dateFilter = null, shiftFilter = null, unitFilter 
       ];
 
       const cutColumns = [
-        'YarnFaults', 'YarnJoints', 'YarnBreaks', 'NCuts', 'SCuts', 'LCuts', 'TCuts', 'FDCuts', 'PPCuts'
+        'YarnFaults', 'NCuts', 'SCuts', 'LCuts', 'TCuts', 'FDCuts', 'PPCuts'
       ];
 
       const qualityColumns = [
