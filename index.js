@@ -192,28 +192,29 @@ let cachedUnitsData = {}; // Store raw JSON data for each unit
 let cachedLiveData = null;
 let lastFetchTime = null;
 
-const fetchAllUnitsData = async () => {
-  const units = ['U-1', 'U-2', 'U-3', 'U-4', 'U-5', 'U-6'];
+const fetchSingleUnitData = async (unit) => {
   const unitMap = {
     'U-1': '1.xlsx', 'U-2': '2.xlsx', 'U-3': '3.xlsx',
     'U-4': '4.xlsx', 'U-5': '5.xlsx', 'U-6': '6.xlsx'
   };
 
-  const newData = {};
-  await Promise.all(units.map(async (unit) => {
-    try {
-      const { data, error } = await supabase.storage.from('uqe').download(unitMap[unit]);
-      if (error) throw error;
-      const arrayBuffer = await data.arrayBuffer();
-      const workbook = XLSX.read(arrayBuffer, { type: 'array', cellDates: true });
-      const sheetName = workbook.SheetNames[0];
-      newData[unit] = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
-    } catch (err) {
-      console.error(`Error caching ${unit}:`, err.message);
-      newData[unit] = cachedUnitsData[unit] || []; // Keep old data on error
-    }
-  }));
-  cachedUnitsData = newData;
+  try {
+    const { data, error } = await supabase.storage.from('uqe').download(unitMap[unit]);
+    if (error) throw error;
+    const arrayBuffer = await data.arrayBuffer();
+    const workbook = XLSX.read(arrayBuffer, { type: 'array', cellDates: true });
+    const sheetName = workbook.SheetNames[0];
+    cachedUnitsData[unit] = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
+    return cachedUnitsData[unit];
+  } catch (err) {
+    console.error(`Error caching ${unit}:`, err.message);
+    return cachedUnitsData[unit] || [];
+  }
+};
+
+const fetchAllUnitsData = async () => {
+  const units = ['U-1', 'U-2', 'U-3', 'U-4', 'U-5', 'U-6'];
+  await Promise.all(units.map(unit => fetchSingleUnitData(unit)));
 };
 
 const getQuantumData = async (dateFilter = null, shiftFilter = null, unitFilter = null, machineFilter = null, isDashboard = false) => {
@@ -580,14 +581,24 @@ app.get('/api/quantum/live', async (req, res) => {
   const { date, shift, unit, machine, mode } = req.query;
   const isDashboard = mode === 'dashboard';
   
+  // If a specific unit is requested and not in cache, fetch it now
+  if (unit && !cachedUnitsData[unit]) {
+    await fetchSingleUnitData(unit);
+  }
+
   if (date || shift || unit || machine || isDashboard) {
     const data = await getQuantumData(date, shift, unit, machine, isDashboard);
     res.json(data);
   } else if (cachedLiveData) {
     res.json(cachedLiveData);
   } else {
-    await updateQuantumLiveData();
-    res.json(cachedLiveData || []);
+    // For general home page load, return what we have or trigger update
+    if (Object.keys(cachedUnitsData).length === 0) {
+        // Background fetch if empty, but don't block everything if we just want a fast load
+        updateQuantumLiveData();
+    }
+    const data = await getQuantumData(null, null, null, null, false);
+    res.json(data);
   }
 });
 
