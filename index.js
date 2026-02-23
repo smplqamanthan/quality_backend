@@ -51,30 +51,44 @@ const formatDateToYYYYMMDD = (date) => {
 app.get(['/api/quality/unique-article-numbers', '/api/long-term/unique-article-numbers'], async (req, res) => {
   try {
     const { q } = req.query;
-    
-    // OPTIMIZED: Use the unique_articles view if it exists, otherwise fallback to a limited scan
-    // This prevents Disk I/O spikes by avoiding full table scans for unique values
-    let { data, error } = await supabaseLongTerm
-      .from('unique_articles')
-      .select('ArticleNumber')
-      .ilike('ArticleNumber', `%${q || ''}%`)
-      .limit(100);
+    if (!q || q.length < 1) {
+      return res.json([]);
+    }
 
-    if (error) {
-      // Fallback: If view doesn't exist, do a limited scan of the main table
-      // We only scan a limited range to prevent killing Disk I/O
-      const fallback = await supabaseLongTerm
+    let allArticles = new Set();
+    let from = 0;
+    const step = 1000;
+    let hasMore = true;
+
+    while (hasMore) {
+      let query = supabaseLongTerm
         .from('uqe_data')
         .select('ArticleNumber')
-        .ilike('ArticleNumber', `%${q || ''}%`)
-        .range(0, 1000);
+        .ilike('ArticleNumber', `%${q}%`)
+        .range(from, from + step - 1);
       
-      if (fallback.error) throw fallback.error;
-      data = fallback.data;
+      const { data, error } = await query;
+      if (error) throw error;
+
+      if (!data || data.length === 0) {
+        hasMore = false;
+      } else {
+        data.forEach(item => {
+          if (item.ArticleNumber) {
+            allArticles.add(item.ArticleNumber);
+          }
+        });
+        
+        if (data.length < step) {
+          hasMore = false;
+        } else {
+          from += step;
+        }
+      }
     }
     
-    const uniqueArticles = [...new Set(data.map(item => item.ArticleNumber))].sort();
-    res.json(uniqueArticles);
+    const sortedArticles = [...allArticles].sort();
+    res.json(sortedArticles);
   } catch (error) {
     console.error('Error fetching unique articles:', error);
     res.status(500).json({ error: error.message });
@@ -159,7 +173,7 @@ app.get(['/api/quality/data', '/api/long-term/data'], async (req, res) => {
       }
 
       if (hasUnitFilter) {
-        query = query.eq('MillUnit', unit);
+        query = query.eq('MillUnit', unit.trim());
       }
 
       // Add range for pagination
@@ -192,29 +206,28 @@ let cachedUnitsData = {}; // Store raw JSON data for each unit
 let cachedLiveData = null;
 let lastFetchTime = null;
 
-const fetchSingleUnitData = async (unit) => {
+const fetchAllUnitsData = async () => {
+  const units = ['U-1', 'U-2', 'U-3', 'U-4', 'U-5', 'U-6'];
   const unitMap = {
     'U-1': '1.xlsx', 'U-2': '2.xlsx', 'U-3': '3.xlsx',
     'U-4': '4.xlsx', 'U-5': '5.xlsx', 'U-6': '6.xlsx'
   };
 
-  try {
-    const { data, error } = await supabase.storage.from('uqe').download(unitMap[unit]);
-    if (error) throw error;
-    const arrayBuffer = await data.arrayBuffer();
-    const workbook = XLSX.read(arrayBuffer, { type: 'array', cellDates: true });
-    const sheetName = workbook.SheetNames[0];
-    cachedUnitsData[unit] = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
-    return cachedUnitsData[unit];
-  } catch (err) {
-    console.error(`Error caching ${unit}:`, err.message);
-    return cachedUnitsData[unit] || [];
-  }
-};
-
-const fetchAllUnitsData = async () => {
-  const units = ['U-1', 'U-2', 'U-3', 'U-4', 'U-5', 'U-6'];
-  await Promise.all(units.map(unit => fetchSingleUnitData(unit)));
+  const newData = {};
+  await Promise.all(units.map(async (unit) => {
+    try {
+      const { data, error } = await supabase.storage.from('uqe').download(unitMap[unit]);
+      if (error) throw error;
+      const arrayBuffer = await data.arrayBuffer();
+      const workbook = XLSX.read(arrayBuffer, { type: 'array', cellDates: true });
+      const sheetName = workbook.SheetNames[0];
+      newData[unit] = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
+    } catch (err) {
+      console.error(`Error caching ${unit}:`, err.message);
+      newData[unit] = cachedUnitsData[unit] || []; // Keep old data on error
+    }
+  }));
+  cachedUnitsData = newData;
 };
 
 const getQuantumData = async (dateFilter = null, shiftFilter = null, unitFilter = null, machineFilter = null, isDashboard = false) => {
@@ -312,7 +325,7 @@ const getQuantumData = async (dateFilter = null, shiftFilter = null, unitFilter 
       ];
 
       const cutColumns = [
-        'YarnFaults', 'NCuts', 'SCuts', 'LCuts', 'TCuts', 'FDCuts', 'PPCuts'
+        'YarnFaults', 'YarnJoints', 'YarnBreaks', 'NCuts', 'SCuts', 'LCuts', 'TCuts', 'FDCuts', 'PPCuts'
       ];
 
       const qualityColumns = [
@@ -581,24 +594,14 @@ app.get('/api/quantum/live', async (req, res) => {
   const { date, shift, unit, machine, mode } = req.query;
   const isDashboard = mode === 'dashboard';
   
-  // If a specific unit is requested and not in cache, fetch it now
-  if (unit && !cachedUnitsData[unit]) {
-    await fetchSingleUnitData(unit);
-  }
-
   if (date || shift || unit || machine || isDashboard) {
     const data = await getQuantumData(date, shift, unit, machine, isDashboard);
     res.json(data);
   } else if (cachedLiveData) {
     res.json(cachedLiveData);
   } else {
-    // For general home page load, return what we have or trigger update
-    if (Object.keys(cachedUnitsData).length === 0) {
-        // Background fetch if empty, but don't block everything if we just want a fast load
-        updateQuantumLiveData();
-    }
-    const data = await getQuantumData(null, null, null, null, false);
-    res.json(data);
+    await updateQuantumLiveData();
+    res.json(cachedLiveData || []);
   }
 });
 
@@ -671,7 +674,7 @@ app.get('/api/quantum/data/:unit', async (req, res) => {
 });
 
 app.get('/api/quantum/trend', async (req, res) => {
-  const { group, firstColumn, parameter, unit: unitFilter, filterValues, dates: datesFilter, filterType, additionalFilterValues, reportType = 'daily' } = req.query;
+  const { group, firstColumn, parameter, unit: unitFilter, filterValues } = req.query;
   
   if (!firstColumn || !parameter) {
     return res.status(400).json({ error: 'firstColumn and parameter are required' });
@@ -680,16 +683,6 @@ app.get('/api/quantum/trend', async (req, res) => {
   let filterValuesArray = null;
   if (filterValues) {
     filterValuesArray = Array.isArray(filterValues) ? filterValues : filterValues.split(',');
-  }
-
-  let datesFilterArray = null;
-  if (datesFilter) {
-    datesFilterArray = Array.isArray(datesFilter) ? datesFilter : datesFilter.split(',');
-  }
-
-  let additionalFilterValuesArray = null;
-  if (additionalFilterValues) {
-    additionalFilterValuesArray = Array.isArray(additionalFilterValues) ? additionalFilterValues : additionalFilterValues.split(',');
   }
 
   try {
@@ -714,12 +707,6 @@ app.get('/api/quantum/trend', async (req, res) => {
         const month = String(d.getMonth() + 1).padStart(2, '0');
         const day = String(d.getDate()).padStart(2, '0');
         const dateStr = `${year}-${month}-${day}`;
-        
-        // Filter by dates if provided
-        if (datesFilterArray && !datesFilterArray.includes(dateStr)) return;
-
-        const shift = item.ShiftNumber || item.Shift || item.shiftnumber || item.shift || '1';
-        const mapKey = reportType === 'shift' ? `${dateStr}_${shift}` : dateStr;
 
         let label = 'Unknown';
         if (firstColumn === 'unit') label = unit;
@@ -730,20 +717,8 @@ app.get('/api/quantum/trend', async (req, res) => {
 
         if (filterValuesArray && !filterValuesArray.includes(label)) return;
 
-        // Apply additional filters
-        if (filterType && additionalFilterValuesArray) {
-          let itemValue = 'Unknown';
-          if (filterType === 'unit') itemValue = unit;
-          else if (filterType === 'articlename') itemValue = item.ArticleName || item.articlename || item.Article || item.article || 'Unknown';
-          else if (filterType === 'articlenumber') itemValue = item.ArticleNumber || item.articlenumber || 'Unknown';
-          else if (filterType === 'lotid') itemValue = item.LotID || item.lotid || item.LotId || 'Unknown';
-          else if (filterType === 'machinename') itemValue = item.MachineName || item.machinename || item.Machine || item.machine || 'Unknown';
-
-          if (!additionalFilterValuesArray.includes(itemValue)) return;
-        }
-
         labels.add(label);
-        dates.add(mapKey);
+        dates.add(dateStr);
 
         // Find parameter value
         let val = 0;
@@ -775,23 +750,23 @@ app.get('/api/quantum/trend', async (req, res) => {
         const yarnLength = Number(item.YarnLength || item.yarnlength || 0) || 0;
         const machineName = item.MachineName || item.machinename || item.Machine || item.machine || 'Unknown';
 
-        if (!trendMap[mapKey]) trendMap[mapKey] = {};
-        if (!trendMap[mapKey][label]) {
-          trendMap[mapKey][label] = { sum: 0, refLength: 0, yarnLength: 0, count: 0, machines: {} };
+        if (!trendMap[dateStr]) trendMap[dateStr] = {};
+        if (!trendMap[dateStr][label]) {
+          trendMap[dateStr][label] = { sum: 0, refLength: 0, yarnLength: 0, count: 0, machines: {} };
         }
         
-        trendMap[mapKey][label].sum += val;
-        trendMap[mapKey][label].refLength += ipRefLength;
-        trendMap[mapKey][label].yarnLength += yarnLength;
-        trendMap[mapKey][label].count += 1;
+        trendMap[dateStr][label].sum += val;
+        trendMap[dateStr][label].refLength += ipRefLength;
+        trendMap[dateStr][label].yarnLength += yarnLength;
+        trendMap[dateStr][label].count += 1;
 
-        if (!trendMap[mapKey][label].machines[machineName]) {
-          trendMap[mapKey][label].machines[machineName] = { sum: 0, refLength: 0, yarnLength: 0, count: 0 };
+        if (!trendMap[dateStr][label].machines[machineName]) {
+          trendMap[dateStr][label].machines[machineName] = { sum: 0, refLength: 0, yarnLength: 0, count: 0 };
         }
-        trendMap[mapKey][label].machines[machineName].sum += val;
-        trendMap[mapKey][label].machines[machineName].refLength += ipRefLength;
-        trendMap[mapKey][label].machines[machineName].yarnLength += yarnLength;
-        trendMap[mapKey][label].machines[machineName].count += 1;
+        trendMap[dateStr][label].machines[machineName].sum += val;
+        trendMap[dateStr][label].machines[machineName].refLength += ipRefLength;
+        trendMap[dateStr][label].machines[machineName].yarnLength += yarnLength;
+        trendMap[dateStr][label].machines[machineName].count += 1;
       });
     });
 
@@ -876,9 +851,7 @@ app.get('/api/quantum/trend', async (req, res) => {
     res.json({
       data: result,
       labels: Array.from(labels).sort(),
-      dates: [...new Set(sortedDates.map(d => d.split('_')[0]))], // Unique base dates
-      allKeys: sortedDates, // All keys (date_shift or date)
-      reportType,
+      dates: sortedDates,
       drillDownData: drillDownData
     });
   } catch (error) {
