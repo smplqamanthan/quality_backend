@@ -47,7 +47,7 @@ router.post("/analyse-stuffing", async (req, res) => {
           for (let r = 1; r <= remaining; r++) {
             if (remaining % r === 0) {
               const c = remaining / r;
-              layouts.push({ rows: r, cols: c, layers: l });
+              layouts.push({ rows: r, cols: c, layers: l, total });
             }
           }
         }
@@ -71,34 +71,70 @@ router.post("/analyse-stuffing", async (req, res) => {
 
     const calculateMulti = (o1, o2, c1, c2) => {
       const results = [];
-      const MAX_GAP = 500; 
-
-      const lay1 = o1.layout || getBestLayoutForCarton(o1.l, o1.w, o1.h, c1);
-      const lay2 = o2.layout || getBestLayoutForCarton(o2.l, o2.w, o2.h, c2);
-
-      // Strategy 1: Stacking layers of C1 and C2 along Height
-      const pL1 = Math.floor(effL / o1.l);
-      const pW1 = Math.floor(effW / o1.w);
-      const pL2 = Math.floor(effL / o2.l);
-      const pW2 = Math.floor(effW / o2.w);
+      const oris2 = getOrientations(o2.l, o2.w, o2.h);
       
-      if (pL1 * pW1 > 0 && pL2 * pW2 > 0) {
-        for (let n1 = 1; n1 * o1.h < effH; n1++) {
-          const n2 = Math.floor((effH - (n1 * o1.h)) / o2.h);
-          if (n2 > 0) {
-            const total1 = n1 * pL1 * pW1;
-            const total2 = n2 * pL2 * pW2;
-            const tCones = (total1 * c1) + (total2 * c2);
-            
-            const unusedL = container.length - Math.min(pL1 * o1.l, pL2 * o2.l);
-            const unusedW = container.width - Math.min(pW1 * o1.w, pW2 * o2.w);
-            const unusedH = container.height - (n1 * o1.h + n2 * o2.h);
+      const maxL1 = Math.floor(effL / o1.l);
+      const maxW1 = Math.floor(effW / o1.w);
+      const maxH1 = Math.floor(effH / o1.h);
 
-            // Constraint: Only exclude if it's way outside reasonable packing
+      // We only try the best few configurations to avoid result bloat
+      // Trying from max downwards
+      for (let nL1 = maxL1; nL1 >= Math.max(0, maxL1 - 2); nL1--) {
+        for (let nW1 = maxW1; nW1 >= Math.max(0, maxW1 - 2); nW1--) {
+          for (let nH1 = maxH1; nH1 >= Math.max(0, maxH1 - 2); nH1--) {
+            if (nL1 * nW1 * nH1 === 0) continue;
+            
+            const total1 = nL1 * nW1 * nH1;
+            const slabs = [
+              { l: effL - nL1 * o1.l, w: effW, h: effH, type: 'L' },
+              { l: nL1 * o1.l, w: effW - nW1 * o1.w, h: effH, type: 'W' },
+              { l: nL1 * o1.l, w: nW1 * o1.w, h: effH - nH1 * o1.h, type: 'H' }
+            ];
+
+            let total2 = 0;
+            let occL = nL1 * o1.l;
+            let occW = nW1 * o1.w;
+            let occH = nH1 * o1.h;
+            
+            let slabDetails = [];
+
+            slabs.forEach(s => {
+              let bestSlab = { count: 0, l: 0, w: 0, h: 0, fitL: 0, fitW: 0, fitH: 0 };
+              oris2.forEach(o => {
+                const fL = Math.floor(s.l / o.l);
+                const fW = Math.floor(s.w / o.w);
+                const fH = Math.floor(s.h / o.h);
+                if (fL * fW * fH > bestSlab.count) {
+                  bestSlab = { count: fL * fW * fH, l: fL * o.l, w: fW * o.w, h: fH * o.h, fitL: fL, fitW: fW, fitH: fH };
+                }
+              });
+              if (bestSlab.count > 0) {
+                total2 += bestSlab.count;
+                slabDetails.push(bestSlab);
+                if (s.type === 'L') occL += bestSlab.l;
+                if (s.type === 'W') occW = Math.max(occW, nW1 * o1.w + bestSlab.w);
+                if (s.type === 'H') occH = Math.max(occH, nH1 * o1.h + bestSlab.h);
+              }
+            });
+
+            if (total2 === 0) continue;
+
+            const tCones = (total1 * c1) + (total2 * c2);
+            const unusedL = container.length - occL;
+            const unusedW = container.width - occW;
+            const unusedH = container.height - occH;
+
             if (unusedL <= SEARCH_MAX_GAP && unusedW <= SEARCH_MAX_GAP && unusedH <= SEARCH_MAX_GAP) {
+              const lay1 = o1.layout || getBestLayoutForCarton(o1.l, o1.w, o1.h, c1);
+              const lay2 = o2.layout || getBestLayoutForCarton(o2.l, o2.w, o2.h, c2);
+              
+              // For carton2 fit specs, we take the largest slab or just the total sum
+              // We'll report the fit dimensions of the primary slab for C2
+              const primarySlab = slabDetails.sort((a,b) => b.count - a.count)[0] || { fitL:0, fitW:0, fitH:0 };
+
               results.push({
                 cartonL: o1.l / 10, cartonW: o1.w / 10, cartonH: o1.h / 10,
-                fitL: pL1, fitW: pW1, fitH: n1,
+                fitL: nL1, fitW: nW1, fitH: nH1,
                 totalCartons: total1,
                 totalCones: tCones,
                 totalWeight: tCones * cone.weight,
@@ -108,83 +144,8 @@ router.post("/analyse-stuffing", async (req, res) => {
                 isMulti: true,
                 carton2: { 
                   l: o2.l / 10, w: o2.w / 10, h: o2.h / 10, 
-                  totalCartons: total2, fitL: pL2, fitW: pW2, fitH: n2,
-                  layout: lay2,
-                  conesPerCarton: c2
-                }
-              });
-            }
-          }
-        }
-      }
-
-      // Strategy 2: Side-by-side along Length
-      const area1 = Math.floor(effW / o1.w) * Math.floor(effH / o1.h);
-      const area2 = Math.floor(effW / o2.w) * Math.floor(effH / o2.h);
-      if (area1 > 0 && area2 > 0) {
-        for (let l1 = 1; l1 * o1.l < effL; l1++) {
-          const l2 = Math.floor((effL - (l1 * o1.l)) / o2.l);
-          if (l2 > 0) {
-            const t1 = l1 * area1;
-            const t2 = l2 * area2;
-            const tCones = (t1 * c1) + (t2 * c2);
-
-            const unusedL = container.length - (l1 * o1.l + l2 * o2.l);
-            const unusedW = container.width - Math.min(Math.floor(effW / o1.w) * o1.w, Math.floor(effW / o2.w) * o2.w);
-            const unusedH = container.height - Math.min(Math.floor(effH / o1.h) * o1.h, Math.floor(effH / o2.h) * o2.h);
-
-            if (unusedL <= SEARCH_MAX_GAP && unusedW <= SEARCH_MAX_GAP && unusedH <= SEARCH_MAX_GAP) {
-              results.push({
-                cartonL: o1.l / 10, cartonW: o1.w / 10, cartonH: o1.h / 10,
-                fitL: l1, fitW: Math.floor(effW / o1.w), fitH: Math.floor(effH / o1.h),
-                totalCartons: t1,
-                totalCones: tCones,
-                totalWeight: tCones * cone.weight,
-                layout: lay1,
-                unusedL, unusedW, unusedH,
-                gapStatus: getGapStatus(unusedL, unusedW, unusedH),
-                isMulti: true,
-                carton2: { 
-                  l: o2.l / 10, w: o2.w / 10, h: o2.h / 10, 
-                  totalCartons: t2, fitL: l2, fitW: Math.floor(effW / o2.w), fitH: Math.floor(effH / o2.h),
-                  layout: lay2,
-                  conesPerCarton: c2
-                }
-              });
-            }
-          }
-        }
-      }
-
-      // Strategy 3: Side-by-side along Width
-      const side1 = Math.floor(effL / o1.l) * Math.floor(effH / o1.h);
-      const side2 = Math.floor(effL / o2.l) * Math.floor(effH / o2.h);
-      if (side1 > 0 && side2 > 0) {
-        for (let w1 = 1; w1 * o1.w < effW; w1++) {
-          const w2 = Math.floor((effW - (w1 * o1.w)) / o2.w);
-          if (w2 > 0) {
-            const t1 = w1 * side1;
-            const t2 = w2 * side2;
-            const tCones = (t1 * c1) + (t2 * c2);
-
-            const unusedL = container.length - Math.min(Math.floor(effL / o1.l) * o1.l, Math.floor(effL / o2.l) * o2.l);
-            const unusedW = container.width - (w1 * o1.w + w2 * o2.w);
-            const unusedH = container.height - Math.min(Math.floor(effH / o1.h) * o1.h, Math.floor(effH / o2.h) * o2.h);
-
-            if (unusedL <= SEARCH_MAX_GAP && unusedW <= SEARCH_MAX_GAP && unusedH <= SEARCH_MAX_GAP) {
-              results.push({
-                cartonL: o1.l / 10, cartonW: o1.w / 10, cartonH: o1.h / 10,
-                fitL: Math.floor(effL / o1.l), fitW: w1, fitH: Math.floor(effH / o1.h),
-                totalCartons: t1,
-                totalCones: tCones,
-                totalWeight: tCones * cone.weight,
-                layout: lay1,
-                unusedL, unusedW, unusedH,
-                gapStatus: getGapStatus(unusedL, unusedW, unusedH),
-                isMulti: true,
-                carton2: { 
-                  l: o2.l / 10, w: o2.w / 10, h: o2.h / 10, 
-                  totalCartons: t2, fitL: Math.floor(effL / o2.l), fitW: w2, fitH: Math.floor(effH / o2.h),
+                  totalCartons: total2,
+                  fitL: primarySlab.fitL, fitW: primarySlab.fitW, fitH: primarySlab.fitH,
                   layout: lay2,
                   conesPerCarton: c2
                 }
@@ -244,21 +205,31 @@ router.post("/analyse-stuffing", async (req, res) => {
         });
       } else {
         // Auto Multi: Try all combinations of layouts for BOTH counts
+        // One is the main carton (at count1), the other can be smaller than count2
         const layouts1 = findAllLayouts(count1);
-        const layouts2 = findAllLayouts(count2);
+        const layouts2 = [];
+        // Only try counts that are likely to fill gaps better (multiples or close to count2)
+        // But the user said "even less than 18 (whatever feed in specs)"
+        // To avoid total explosion, let's pick some reasonable counts
+        for (let c = count2; c >= 1; c--) {
+          layouts2.push(...findAllLayouts(c));
+          if (layouts2.length > 100) break;
+        }
         
         const candidates1 = layouts1.map(layout => ({
           l: cone.diameter * layout.cols,
           w: cone.diameter * layout.rows,
           h: cone.height * layout.layers,
-          layout
+          layout,
+          total: count1
         })).filter(c => c.l <= 1000 && c.w <= 1000 && c.h <= 1000);
 
         const candidates2 = layouts2.map(layout => ({
           l: cone.diameter * layout.cols,
           w: cone.diameter * layout.rows,
           h: cone.height * layout.layers,
-          layout
+          layout,
+          total: layout.total
         })).filter(c => c.l <= 1000 && c.w <= 1000 && c.h <= 1000);
 
         for (let i = 0; i < candidates1.length; i++) {
@@ -269,13 +240,13 @@ router.post("/analyse-stuffing", async (req, res) => {
               if (o1.l > 1000 || o1.w > 1000 || o1.h > 1000) return;
               oris2.forEach(o2 => {
                 if (o2.l > 1000 || o2.w > 1000 || o2.h > 1000) return;
-                // Ensure combinations are actually different if counts are same
-                if (count1 !== count2 || o1.l !== o2.l || o1.w !== o2.w || o1.h !== o2.h) {
-                   allResults.push(...calculateMulti(
-                     {...o1, layout: candidates1[i].layout}, 
-                     {...o2, layout: candidates2[j].layout},
-                     count1, count2
-                   ));
+                // Add layouts to oris
+                const o1WithL = {...o1, layout: candidates1[i].layout};
+                const o2WithL = {...o2, layout: candidates2[j].layout};
+                
+                // For Auto Multi, only call calculateMulti if it's potentially different
+                if (count1 !== candidates2[j].total || o1.l !== o2.l || o1.w !== o2.w || o1.h !== o2.h) {
+                   allResults.push(...calculateMulti(o1WithL, o2WithL, count1, candidates2[j].total));
                 }
               });
             });
