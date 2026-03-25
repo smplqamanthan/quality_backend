@@ -21,7 +21,7 @@ router.post("/analyse-stuffing", async (req, res) => {
     
     // Hard search limits (wide tolerance to ensure options are always shown)
     const SEARCH_BUFFER = 10; // Minimum physical clearance to even attempt a fit
-    const SEARCH_MAX_GAP = 500; // Skip if more than 50cm is wasted
+    const SEARCH_MAX_GAP = 5000; // Increase to show almost any valid combination
     
     const effL = container.length - SEARCH_BUFFER;
     const effW = container.width - SEARCH_BUFFER;
@@ -39,8 +39,42 @@ router.post("/analyse-stuffing", async (req, res) => {
       };
     };
 
+    const findAllLayouts = (total) => {
+      const layouts = [];
+      for (let l = 1; l <= total; l++) {
+        if (total % l === 0) {
+          const remaining = total / l;
+          for (let r = 1; r <= remaining; r++) {
+            if (remaining % r === 0) {
+              const c = remaining / r;
+              layouts.push({ rows: r, cols: c, layers: l });
+            }
+          }
+        }
+      }
+      return layouts;
+    };
+
+    const getBestLayoutForCarton = (l, w, h, totalCones) => {
+      const layouts = findAllLayouts(totalCones);
+      for (const lay of layouts) {
+        const orientations = [
+          { l: lay.cols * cone.diameter, w: lay.rows * cone.diameter, h: lay.layers * cone.height },
+          { l: lay.rows * cone.diameter, w: lay.cols * cone.diameter, h: lay.layers * cone.height }
+        ];
+        for (const ori of orientations) {
+          if (ori.l <= l + 5 && ori.w <= w + 5 && ori.h <= h + 5) return lay;
+        }
+      }
+      return { rows: 0, cols: 0, layers: 0 };
+    };
+
     const calculateMulti = (o1, o2, c1, c2) => {
       const results = [];
+      const MAX_GAP = 500; 
+
+      const lay1 = o1.layout || getBestLayoutForCarton(o1.l, o1.w, o1.h, c1);
+      const lay2 = o2.layout || getBestLayoutForCarton(o2.l, o2.w, o2.h, c2);
 
       // Strategy 1: Stacking layers of C1 and C2 along Height
       const pL1 = Math.floor(effL / o1.l);
@@ -68,14 +102,14 @@ router.post("/analyse-stuffing", async (req, res) => {
                 totalCartons: total1,
                 totalCones: tCones,
                 totalWeight: tCones * cone.weight,
-                layout: o1.layout || { rows: 0, cols: 0, layers: 0 },
+                layout: lay1,
                 unusedL, unusedW, unusedH,
                 gapStatus: getGapStatus(unusedL, unusedW, unusedH),
                 isMulti: true,
                 carton2: { 
                   l: o2.l / 10, w: o2.w / 10, h: o2.h / 10, 
                   totalCartons: total2, fitL: pL2, fitW: pW2, fitH: n2,
-                  layout: o2.layout || { rows: 0, cols: 0, layers: 0 },
+                  layout: lay2,
                   conesPerCarton: c2
                 }
               });
@@ -106,14 +140,14 @@ router.post("/analyse-stuffing", async (req, res) => {
                 totalCartons: t1,
                 totalCones: tCones,
                 totalWeight: tCones * cone.weight,
-                layout: o1.layout || { rows: 0, cols: 0, layers: 0 },
+                layout: lay1,
                 unusedL, unusedW, unusedH,
                 gapStatus: getGapStatus(unusedL, unusedW, unusedH),
                 isMulti: true,
                 carton2: { 
                   l: o2.l / 10, w: o2.w / 10, h: o2.h / 10, 
                   totalCartons: t2, fitL: l2, fitW: Math.floor(effW / o2.w), fitH: Math.floor(effH / o2.h),
-                  layout: o2.layout || { rows: 0, cols: 0, layers: 0 },
+                  layout: lay2,
                   conesPerCarton: c2
                 }
               });
@@ -144,14 +178,14 @@ router.post("/analyse-stuffing", async (req, res) => {
                 totalCartons: t1,
                 totalCones: tCones,
                 totalWeight: tCones * cone.weight,
-                layout: o1.layout || { rows: 0, cols: 0, layers: 0 },
+                layout: lay1,
                 unusedL, unusedW, unusedH,
                 gapStatus: getGapStatus(unusedL, unusedW, unusedH),
                 isMulti: true,
                 carton2: { 
                   l: o2.l / 10, w: o2.w / 10, h: o2.h / 10, 
                   totalCartons: t2, fitL: Math.floor(effL / o2.l), fitW: w2, fitH: Math.floor(effH / o2.h),
-                  layout: o2.layout || { rows: 0, cols: 0, layers: 0 },
+                  layout: lay2,
                   conesPerCarton: c2
                 }
               });
@@ -180,12 +214,13 @@ router.post("/analyse-stuffing", async (req, res) => {
           const unusedH = container.height - (fitH * ori.h);
 
           if (unusedL <= SEARCH_MAX_GAP && unusedW <= SEARCH_MAX_GAP && unusedH <= SEARCH_MAX_GAP) {
+            const layout = carton.layout || getBestLayoutForCarton(ori.l, ori.w, ori.h, count1);
             allResults.push({
               cartonL: ori.l / 10, cartonW: ori.w / 10, cartonH: ori.h / 10,
               fitL, fitW, fitH, totalCartons,
               totalCones,
               totalWeight: totalCones * cone.weight,
-              layout: carton.layout || { rows: 0, cols: 0, layers: 0 },
+              layout,
               unusedL, unusedW, unusedH,
               gapStatus: getGapStatus(unusedL, unusedW, unusedH),
             });
@@ -194,21 +229,6 @@ router.post("/analyse-stuffing", async (req, res) => {
       });
     };
 
-    const findAllLayouts = (total) => {
-      const layouts = [];
-      for (let l = 1; l <= total; l++) {
-        if (total % l === 0) {
-          const remaining = total / l;
-          for (let r = 1; r <= remaining; r++) {
-            if (remaining % r === 0) {
-              const c = remaining / r;
-              layouts.push({ rows: r, cols: c, layers: l });
-            }
-          }
-        }
-      }
-      return layouts;
-    };
 
     if (type === 'multi') {
       if (carton1 && carton2) {
