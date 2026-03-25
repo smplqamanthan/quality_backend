@@ -11,6 +11,7 @@ import dispatchResultsRoutes from "./routes/dispatch-results.js";
 import cottonRoutes from "./routes/cotton.js";
 import authRoutes from "./routes/auth.js";
 import yarnRealizationRoutes from "./routes/yarn-realization.js";
+import stuffingRoutes from "./routes/stuffing.js";
 
 dotenv.config();
 
@@ -98,6 +99,7 @@ apiRouter.use(dispatchResultsRoutes);
 apiRouter.use(cottonRoutes);
 apiRouter.use(authRoutes);
 apiRouter.use(yarnRealizationRoutes);
+apiRouter.use(stuffingRoutes);
 
 app.use("/api", apiRouter);
 
